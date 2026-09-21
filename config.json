@@ -2,9 +2,17 @@
     "starting_budget": 10000,
 
     "dca": {
+        "allocation": 6000,
         "amount": 500,
         "drop_threshold": 0.03
     },
+
+    "swing": {
+        "allocation": 3000,
+        "trade_amount": 1000
+    },
+
+    "reserve": 1000,
 
     "atr": {
         "period": 14,
