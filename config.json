@@ -1,0 +1,13 @@
+{
+    "starting_budget": 10000,
+
+    "dca": {
+        "amount": 500,
+        "drop_threshold": 0.03
+    },
+
+    "atr": {
+        "period": 14,
+        "multiplier": 1.5
+    }
+}
