@@ -1,9 +1,11 @@
 def should_open_swing_trade(
-    short_sma,
-    long_sma
-):
+        prev_short_sma,
+        prev_long_sma,
+        cur_short_sma,
+        cur_long_sma
+        ):
 
-    if short_sma > long_sma:
+    if prev_short_sma <= prev_long_sma and cur_short_sma > cur_long_sma:
         return True
 
     return False

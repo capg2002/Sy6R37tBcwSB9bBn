@@ -1,12 +1,18 @@
 class Portfolio:
 
-    def __init__(self, starting_cash):
+    def __init__(self, starting_cash, dca_allocation, swing_allocation, reserve, fee_rate):
 
         self.starting_cash = starting_cash
-        self.cash = starting_cash
 
-        self.dca_btc = 0
-        self.active_btc = 0
+        self.dca_cash = dca_allocation
+        self.swing_cash = swing_allocation
+        self.reserve_cash = reserve
+
+        self.dca_cost = 0.0
+        self.active_cost = 0.0
+        self.realized_pnl = 0.0
+
+        self.fee_rate = fee_rate
 
         self.trades = []
 
@@ -18,12 +24,16 @@ class Portfolio:
         strategy="DCA"
     ):
 
-        if dollar_amount > self.cash:
+        if dollar_amount > self.dca_cash:
             return False
 
-        btc_bought = dollar_amount / btc_price
+        purchase_value = dollar_amount / (1 + self.fee_rate)
+        fee = purchase_value * self.fee_rate
 
-        self.cash -= dollar_amount
+        btc_bought = purchase_value / btc_price
+
+        self.dca_cash -= dollar_amount
+        self.dca_cost += dollar_amount
         self.dca_btc += btc_bought
 
         trade = {
@@ -34,7 +44,10 @@ class Portfolio:
             "usd_amount": dollar_amount,
             "btc_amount": btc_bought,
             "cash_remaining": self.cash,
-            "btc_balance": self.dca_btc
+            "btc_balance": self.dca_btc,
+            "gross_usd": purchase_value,
+            "fee_usd": fee,
+            "cash_spent": dollar_amount,
         }
 
         self.trades.append(trade)
@@ -67,12 +80,16 @@ class Portfolio:
         timestamp
     ):
 
-        if dollar_amount > self.cash:
+        if dollar_amount > self.swing_cash:
             return False
 
-        btc_bought = dollar_amount / btc_price
+        purchase_value = dollar_amount / (1 + self.fee_rate)
+        fee = purchase_value * self.fee_rate
 
-        self.cash -= dollar_amount
+        btc_bought = purchase_value / btc_price
+
+        self.swing_cash -= dollar_amount
+        self.active_cost += dollar_amount
         self.active_btc += btc_bought
 
         trade = {
@@ -82,7 +99,10 @@ class Portfolio:
             "btc_price": btc_price,
             "usd_amount": dollar_amount,
             "btc_amount": btc_bought,
-            "cash_remaining": self.cash
+            "cash_remaining": self.cash,
+            "gross_usd": purchase_value,
+            "fee_usd": fee,
+            "cash_spent": dollar_amount
         }
 
         self.trades.append(trade)
@@ -94,6 +114,12 @@ class Portfolio:
         )
 
         return True
+
+    @property
+    def cash(self):
+        return( self.dca_cash
+               + self.swing_cash
+               + self.reserve_cash)
 
     def sell_active(
         self,
@@ -110,8 +136,19 @@ class Portfolio:
             btc_sold * btc_price
         )
 
-        self.cash += usd_received
+        self.swing_cash += usd_received
         self.active_btc = 0
+
+        gross_proceeds = btc_sold * btc_price
+        fee = gross_proceeds * self.fee_rate
+        net_proceeds = gross_proceeds - fee
+
+        trade_pnl = net_proceeds - self.active_cost
+
+        self.realized_pnl += trade_pnl
+        self.active_cost = 0.0
+
+        self.swing_cash += net_proceeds
 
         trade = {
             "timestamp": timestamp,
@@ -120,7 +157,11 @@ class Portfolio:
             "btc_price": btc_price,
             "usd_amount": usd_received,
             "btc_amount": btc_sold,
-            "cash_remaining": self.cash
+            "gross_usd": gross_proceeds,
+            "fee_usd": fee,
+            "net_proceeds": net_proceeds,
+            "cash_remaining": self.cash,
+            "realized_pnl": trade_pnl
         }
 
         self.trades.append(trade)
@@ -130,5 +171,7 @@ class Portfolio:
             f"{btc_sold:.6f} BTC at "
             f"${btc_price:.2f}"
         )
+
+        
 
         return True
