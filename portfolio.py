@@ -11,6 +11,8 @@ class Portfolio:
         self.dca_cost = 0.0
         self.active_cost = 0.0
         self.realized_pnl = 0.0
+        self.dca_btc = 0.0
+        self.active_btc = 0.0
 
         self.fee_rate = fee_rate
 
@@ -132,30 +134,28 @@ class Portfolio:
 
         btc_sold = self.active_btc
 
-        usd_received = (
-            btc_sold * btc_price
-        )
-
-        self.swing_cash += usd_received
-        self.active_btc = 0
-
         gross_proceeds = btc_sold * btc_price
         fee = gross_proceeds * self.fee_rate
         net_proceeds = gross_proceeds - fee
 
         trade_pnl = net_proceeds - self.active_cost
 
-        self.realized_pnl += trade_pnl
-        self.active_cost = 0.0
-
+        # Credit the sale once, after deducting its fee.
         self.swing_cash += net_proceeds
+
+        # Record the closed position's profit or loss.
+        self.realized_pnl += trade_pnl
+
+        # The entire swing position has been sold.
+        self.active_btc = 0.0
+        self.active_cost = 0.0
 
         trade = {
             "timestamp": timestamp,
             "strategy": "SWING",
             "side": "SELL",
             "btc_price": btc_price,
-            "usd_amount": usd_received,
+            "usd_amount": net_proceeds,
             "btc_amount": btc_sold,
             "gross_usd": gross_proceeds,
             "fee_usd": fee,
@@ -168,10 +168,9 @@ class Portfolio:
 
         print(
             f"{timestamp} | SWING SELL | "
-            f"{btc_sold:.6f} BTC at "
-            f"${btc_price:.2f}"
+            f"{btc_sold:.6f} BTC at ${btc_price:.2f} | "
+            f"Net proceeds: ${net_proceeds:.2f} | "
+            f"P/L: ${trade_pnl:.2f}"
         )
-
-        
 
         return True

@@ -1,0 +1,12 @@
+{
+    "starting_value": 10000,
+    "final_value": 9258.994406051257,
+    "return_pct": -7.4100559394874255,
+    "max_drawdown_pct": 27.808555676288638,
+    "trade_count": 91,
+    "fees_paid": 84.53625882897569,
+    "realized_pnl": -456.3693379451379,
+    "unrealized_pnl": -284.6362560036064,
+    "dca_pnl": -674.5013114153417,
+    "swing_pnl": -66.50428253340215
+}

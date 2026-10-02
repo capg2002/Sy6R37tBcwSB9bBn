@@ -31,8 +31,11 @@ run_dir.mkdir(parents=True, exist_ok=True)
 # Load configuration
 # -----------------------------
 
-with open("config.json", "r") as file:
+with open(BASE_DIR / "config.json", "r") as file:
     config = json.load(file)
+
+with open(run_dir / "config_used.json", "w") as file:
+    json.dump(config, file, indent=4)
 
 
 # -----------------------------
@@ -67,6 +70,61 @@ if btc_data.index.has_duplicates:
     raise ValueError("Duplicate candle timestamps found.")
 
 btc_data = btc_data.sort_index()
+
+# -------------------------------------------------
+# Keep only completed hourly candles.
+#
+# Assumption: timestamps label candle OPENING times.
+# A candle starting at 14:00 finishes at 15:00.
+# -------------------------------------------------
+
+if btc_data.index.tz is None:
+    raise ValueError(
+        "Market-data timestamps have no timezone. "
+        "Confirm the source timezone before continuing."
+    )
+
+# Use UTC consistently.
+btc_data.index = btc_data.index.tz_convert("UTC")
+
+now = pd.Timestamp.now(tz="UTC")
+candle_duration = pd.Timedelta(hours=1)
+
+candle_end_times = btc_data.index + candle_duration
+completed = candle_end_times <= now
+
+removed_count = int((~completed).sum())
+btc_data = btc_data.loc[completed].copy()
+
+if removed_count > 0:
+    print(
+        f"Excluded {removed_count} candle(s) "
+        "whose closing time has not yet arrived."
+    )
+
+if btc_data.empty:
+    raise ValueError("No completed candles are available.")
+
+# -------------------------------------------------
+# Check that consecutive candles are one hour apart.
+# -------------------------------------------------
+
+time_gaps = btc_data.index.to_series().diff()
+
+bad_gaps = (
+    time_gaps.notna()
+    & (time_gaps != candle_duration)
+)
+
+if bad_gaps.any():
+    first_bad_timestamp = time_gaps.index[bad_gaps][0]
+    gap_size = time_gaps.loc[first_bad_timestamp]
+
+    raise ValueError(
+        "Missing or irregular hourly candles: "
+        f"the gap ending at {first_bad_timestamp} "
+        f"is {gap_size}, rather than one hour."
+    )
 
 prices = btc_data[required_columns].apply(
     pd.to_numeric,
@@ -157,7 +215,8 @@ portfolio = Portfolio(
     config["starting_budget"],
     config["dca"]["allocation"],
     config["swing"]["allocation"],
-    config["reserve"]
+    config["reserve"],
+    config["execution"]["fee_rate"]
 )
 
 
@@ -173,6 +232,8 @@ last_buy_price = None
 # -----------------------------
 portfolio_history = []
 pending_swing_buy = None
+pending_dca_buy = None
+exited_this_candle = False
 active_position = None
 
 # Keep this initialization before the loop.
@@ -195,6 +256,22 @@ for timestamp, candle in btc_data.iterrows():
     # 1. AT THE OPEN:
     # Execute the order saved after the previous close.
     # -------------------------------------------------
+
+        # Execute the DCA decision made at the previous close.
+    if pending_dca_buy is not None:
+
+        trade_successful = portfolio.buy_btc(
+            pending_dca_buy["amount"],
+            opening_price,
+            timestamp
+        )
+
+        if trade_successful:
+            # Remember the actual simulated purchase price.
+            last_buy_price = opening_price
+
+        # Give this order one execution attempt.
+        pending_dca_buy = None
 
     if pending_swing_buy is not None:
 
@@ -259,13 +336,14 @@ for timestamp, candle in btc_data.iterrows():
     # Generate an order for the NEXT candle's opening.
     # -------------------------------------------------
 
-    indicators_available = pd.notna([
-        prev_short_sma,
-        prev_long_sma,
-        cur_short_sma,
-        cur_long_sma,
-        current_atr
-    ]).all()
+    indicator_values = candle[required_indicators]
+
+    indicators_available = (
+        indicator_values.notna().all()
+        and not indicator_values.isin(
+            [float("inf"), float("-inf")]
+        ).any()
+    )
 
     if (
         active_position is None
@@ -288,24 +366,22 @@ for timestamp, candle in btc_data.iterrows():
             }
 
     # -------------------------------------------------
-    # 4. DCA:
-    # Your existing close-price execution is retained.
+    # 4. AT THE CLOSE:
+    # Schedule a DCA purchase for the next opening.
     # -------------------------------------------------
 
-    if should_dca_buy(
-        current_price,
-        last_buy_price,
-        config["dca"]["drop_threshold"]
+    if (
+        portfolio.dca_cash >= config["dca"]["amount"]
+        and should_dca_buy(
+            current_price,
+            last_buy_price,
+            config["dca"]["drop_threshold"]
+        )
     ):
 
-        trade_successful = portfolio.buy_btc(
-            config["dca"]["amount"],
-            current_price,
-            timestamp
-        )
-
-        if trade_successful:
-            last_buy_price = current_price
+        pending_dca_buy = {
+            "amount": config["dca"]["amount"]
+        }
 
     # -------------------------------------------------
     # 5. Record portfolio value at this candle's close.
@@ -346,13 +422,13 @@ history_df["drawdown"] = (
 max_drawdown = -history_df["drawdown"].min()
 
 history_df.to_csv(
-    "data/portfolio_history.csv",
+    run_dir / "portfolio_history.csv",
     index=False
 )
 
 print(
-    "Portfolio history saved to "
-    "data/portfolio_history.csv"
+    f"Portfolio history saved to "
+    f"{run_dir / 'portfolio_history.csv'}"
 )
 
 # -----------------------------
@@ -389,6 +465,25 @@ swing_value = (
 dca_pnl = dca_value - config["dca"]["allocation"]
 swing_pnl = swing_value - config["swing"]["allocation"]
 
+account_profit = final_value - starting_value
+
+recorded_profit = (
+    portfolio.realized_pnl
+    + dca_unrealized_pnl
+    + swing_unrealized_pnl
+)
+
+if abs(account_profit - recorded_profit) > 0.000001:
+    raise ValueError(
+        "Accounting mismatch: portfolio growth does not "
+        "equal realized plus unrealized P/L."
+    )
+
+if abs(account_profit - (dca_pnl + swing_pnl)) > 0.000001:
+    raise ValueError(
+        "Accounting mismatch: strategy profits do not "
+        "add up to total portfolio profit."
+    )
 
 summary = {
     "starting_value": starting_value,
@@ -409,6 +504,11 @@ summary = {
     "dca_pnl": dca_pnl,
     "swing_pnl": swing_pnl
 }
+
+with open(run_dir / "summary.json", "w") as file:
+    json.dump(summary, file, indent=4)
+
+print(json.dumps(summary, indent=4))
 
 print()
 print("FINAL RESULTS")
@@ -432,12 +532,13 @@ print(
 trades_df = pd.DataFrame(portfolio.trades)
 
 trades_df.to_csv(
-    "data/trades.csv",
+    run_dir / "trades.csv",
     index=False
 )
 
-print()
-print("Trades saved to data/trades.csv")
+print(
+    f"Trades saved to {run_dir / 'trades.csv'}"
+)
 
 starting_value = config["starting_budget"]
 

@@ -1,0 +1,9 @@
+{
+    "run_id": "20260929T201006_175527Z",
+    "data_sha256": "9caa60d9506b99473cef9e124923fde797771c937b26dd83d8b5fd1031e7d36f",
+    "first_candle": "2025-09-29 20:00:00+00:00",
+    "last_candle": "2026-09-29 20:00:00+00:00",
+    "number_of_candles": 8729,
+    "atr_method": "simple rolling mean of true range",
+    "atr_period": 14
+}
