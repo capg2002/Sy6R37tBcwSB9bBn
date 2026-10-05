@@ -28,5 +28,10 @@
         "forecast_every_hours": 1,
         "n_paths": 5,
         "seed": 123
+    },
+    "risk": {
+        "garch_sizing_enabled": true,
+        "reference_hourly_sigma": 0.004,
+        "minimum_swing_amount": 25.0
     }
 }

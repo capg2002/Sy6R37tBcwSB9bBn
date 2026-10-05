@@ -10,6 +10,7 @@ import pandas as pd
 
 from missing_data import prepare_hourly_data
 from volatility import forecast_volatility
+from risk import size_swing_purchase
 
 from market_data import get_btc_data
 from indicators import (
@@ -150,6 +151,14 @@ window_hours = int(garch_config.get("window_hours", 24 * 180))
 if forecast_every < 1 or window_hours < 3:
     raise ValueError("Invalid GARCH cadence or window.")
 
+risk_config = config["risk"]
+risk_history = []
+
+if forecast_every != 1:
+    raise ValueError(
+        "This sizing experiment requires a fresh forecast every hour."
+    )
+
 for row_number, (timestamp, candle) in enumerate(btc_data.iterrows()):
 
     if not candle["observed_ohlc"]:
@@ -266,6 +275,8 @@ for row_number, (timestamp, candle) in enumerate(btc_data.iterrows()):
 
     # Diagnostic forecast made after THIS candle closes. The result describes
     # the next hour only; with cadence=24 we log daily, not reuse it for 24 hours.
+    estimate = None
+    
     if row_number % forecast_every == 0:
         history = btc_data["Close"].iloc[max(0, row_number + 1 - window_hours):row_number + 1]
         estimate = forecast_volatility(
@@ -296,19 +307,43 @@ for row_number, (timestamp, candle) in enumerate(btc_data.iterrows()):
         and indicators_available
         and current_atr > 0
     ):
-
         if should_open_swing_trade(
             prev_short_sma,
             prev_long_sma,
             cur_short_sma,
-            cur_long_sma
+            cur_long_sma,
         ):
+            amount, reason = size_swing_purchase(
+                base_amount=config["swing"]["trade_amount"],
+                available_cash=portfolio.swing_cash,
+                estimate=estimate,
+                reference_sigma=risk_config["reference_hourly_sigma"],
+                minimum_amount=risk_config["minimum_swing_amount"],
+                enabled=risk_config["garch_sizing_enabled"],
+            )
 
-            pending_swing_buy = {
-                "amount": config["swing"]["trade_amount"],
-                "atr": current_atr,
-                "atr_multiplier": config["atr"]["multiplier"]
-            }
+            risk_history.append({
+                "signal_candle_open": timestamp,
+                "decision_time": timestamp + pd.Timedelta(hours=1),
+                "forecast_status": (
+                    estimate.status if estimate is not None else "unavailable"
+                ),
+                "sigma_next_hour": (
+                    estimate.sigma_next_hour if estimate is not None else None
+                ),
+                "base_amount": config["swing"]["trade_amount"],
+                "swing_cash_available": portfolio.swing_cash,
+                "approved_amount": amount,
+                "garch_sizing_enabled": risk_config["garch_sizing_enabled"],
+                "reason": reason,
+            })
+
+            if amount > 0:
+                pending_swing_buy = {
+                    "amount": amount,
+                    "atr": current_atr,
+                    "atr_multiplier": config["atr"]["multiplier"],
+                }
 
     # -------------------------------------------------
     # 4. DCA: decide at the close, attempt execution at the next open.
@@ -488,6 +523,11 @@ trades_df.to_csv(
 
 print(
     f"Trades saved to {run_dir / 'trades.csv'}"
+)
+
+pd.DataFrame(risk_history).to_csv(
+    run_dir / "risk_history.csv",
+    index=False,
 )
 
 starting_value = config["starting_budget"]

@@ -1,0 +1,27 @@
+{
+  "symbol": "BTC-USD",
+  "interval": "1h",
+  "request": {
+    "period": "1y"
+  },
+  "download_started_utc": "2026-09-30 20:14:36.284358+00:00",
+  "pandas_version": "2.3.3",
+  "yfinance_version": "1.7.0",
+  "keepna": true,
+  "repair": false,
+  "auto_adjust": true,
+  "raw_rows": 8761,
+  "original_timezone": "UTC",
+  "originally_sorted": true,
+  "duplicate_rows_including_first": 0,
+  "unfinished_or_future_rows": 1,
+  "invalid_completed_price_rows": 32,
+  "off_hour_timestamps": 0,
+  "first_completed_open": "2025-09-30 20:00:00+00:00",
+  "last_completed_open": "2026-09-30 19:00:00+00:00",
+  "hours_since_last_completed_close": 0.24341232166666665,
+  "irregular_intervals": 0,
+  "missing_hours_within_returned_span": 0,
+  "scope": "Internal coverage only; does not prove requested start/end coverage or explain the cause of missing data.",
+  "gap_retries": []
+}
