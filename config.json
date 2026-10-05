@@ -21,5 +21,12 @@
 
     "execution": {
         "fee_rate": 0.001
+    },
+    "garch": {
+        "window_hours": 4320,
+        "min_observed_returns": 500,
+        "forecast_every_hours": 1,
+        "n_paths": 5,
+        "seed": 123
     }
 }
