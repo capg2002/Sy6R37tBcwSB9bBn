@@ -1,0 +1,39 @@
+{
+    "starting_budget": 10000,
+    "exits": {
+        "garch_trailing_enabled": true,
+        "garch_trailing_multiplier": 3.0,
+        "bearish_crossover_enabled": true
+    },
+    "dca": {
+        "allocation": 6000,
+        "amount": 500,
+        "drop_threshold": 0.03
+    },
+    "swing": {
+        "allocation": 3000,
+        "trade_amount": 1000,
+        "crossover": "bull"
+    },
+    "reserve": 1000,
+    "atr": {
+        "period": 14,
+        "multiplier": 2.0
+    },
+    "execution": {
+        "fee_rate": 0.001,
+        "slippage_rate": 0.0005
+    },
+    "garch": {
+        "window_hours": 4320,
+        "min_observed_returns": 500,
+        "forecast_every_hours": 1,
+        "n_paths": 5,
+        "seed": 123
+    },
+    "risk": {
+        "garch_sizing_enabled": true,
+        "reference_hourly_sigma": 0.004,
+        "minimum_swing_amount": 25.0
+    }
+}

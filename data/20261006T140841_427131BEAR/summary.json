@@ -1,0 +1,16 @@
+{
+    "execution_path_uncertain": false,
+    "missing_or_invalid_hours": 32,
+    "final_valuation_is_stale": false,
+    "performance_note": "Missing hours prevent complete drawdown measurement; if execution_path_uncertain is true, trades/P&L are a continuation scenario, not verified historical execution.",
+    "starting_value": 10000,
+    "final_value": 9029.479514483153,
+    "return_pct": -9.70520485516847,
+    "max_drawdown_pct": 27.57838914522389,
+    "trade_count": 180,
+    "fees_paid": 149.7285172879734,
+    "realized_pnl": -77.41502551836464,
+    "unrealized_pnl": -893.1054599984818,
+    "dca_pnl": -893.1054599984818,
+    "swing_pnl": -77.41502551836538
+}

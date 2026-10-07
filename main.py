@@ -1,31 +1,31 @@
+"""
+Historical backtest: DCA and swing entries, ATR stops, GARCH sizing/trailing.
+main preserves a maintained historical backtest for the trading strategies. It does not deal with money nor
+external applications.
+"""
+import hashlib
+import json
 from pathlib import Path
 from datetime import datetime, timezone
-import hashlib
+from math import isfinite
 
-import json
 import pandas as pd
 
-from market_data import get_btc_data
-from indicators import (
-    calculate_atr,
-    calculate_sma
-)
-from swing_strategy import (
-    should_open_swing_trade,
-    calculate_stop_loss
-)
-from portfolio import Portfolio
-from dca_strategy import should_dca_buy
+from market.missing_data import prepare_hourly_data
+from market.market_data import get_btc_data
+from market.indicators import calculate_atr, calculate_sma
 
+from trading.portfolio import Portfolio
+from trading.models import EngineState
+from trading.execution import ExecutionModel
+from trading.engine import process_candle
+
+from services.config_validation import validate_config
+from services.storage import SQLiteStore
+
+# Base directory to read and write files
 
 BASE_DIR = Path(__file__).resolve().parent
-
-run_id = datetime.now(timezone.utc).strftime(
-    "%Y%m%dT%H%M%S_%fZ"
-)
-
-run_dir = BASE_DIR / "data" / run_id
-run_dir.mkdir(parents=True, exist_ok=True)
 
 # -----------------------------
 # Load configuration
@@ -34,477 +34,269 @@ run_dir.mkdir(parents=True, exist_ok=True)
 with open(BASE_DIR / "config.json", "r") as file:
     config = json.load(file)
 
-with open(run_dir / "config_used.json", "w") as file:
-    json.dump(config, file, indent=4)
+# Function that ensures config is in the expected format and throws error if not.
+validate_config(config)
 
+# Storing variable names for key configurations
+exit_config = config["exits"]
+
+garch_trailing_enabled = exit_config["garch_trailing_enabled"]
+garch_trailing_multiplier = float(exit_config["garch_trailing_multiplier"])
+
+
+
+if (not isfinite(garch_trailing_multiplier)
+    or garch_trailing_multiplier <= 0):
+    raise ValueError( "garch_trailing_multiplier must be finite and positive." )
+
+# Keeps track of whether backtest uses bearish or bullish entrance strategy in data tracking name
+crossover_config = config["swing"]["crossover"]
+run_id = (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+          + "_" + crossover_config.upper())
+run_dir = BASE_DIR / "data" / run_id
+run_dir.mkdir(parents=True, exist_ok=True)
 
 # -----------------------------
 # Download BTC data
 # -----------------------------
 
+# get_btc_data uses yFinance to download historical data spanning back the past year in hourly increments.
 btc_data = get_btc_data()
-
-required_columns = ["Open", "High", "Low", "Close"]
-
 if btc_data is None or btc_data.empty:
-    raise ValueError("No market data was returned.")
+    raise ValueError("The market-data download returned no candles.")
 
-missing_columns = [
-    column
-    for column in required_columns
-    if column not in btc_data.columns
-]
-
-if missing_columns:
-    raise ValueError(
-        f"Missing market-data columns: {missing_columns}"
-    )
-
-if not isinstance(btc_data.index, pd.DatetimeIndex):
-    raise ValueError("Market data must have datetime timestamps.")
-
-if btc_data.index.hasnans:
-    raise ValueError("Some candle timestamps are missing.")
-
-if btc_data.index.has_duplicates:
-    raise ValueError("Duplicate candle timestamps found.")
-
-btc_data = btc_data.sort_index()
-
-# -------------------------------------------------
-# Keep only completed hourly candles.
-#
-# Assumption: timestamps label candle OPENING times.
-# A candle starting at 14:00 finishes at 15:00.
-# -------------------------------------------------
-
-if btc_data.index.tz is None:
-    raise ValueError(
-        "Market-data timestamps have no timezone. "
-        "Confirm the source timezone before continuing."
-    )
-
-# Use UTC consistently.
-btc_data.index = btc_data.index.tz_convert("UTC")
-
-now = pd.Timestamp.now(tz="UTC")
-candle_duration = pd.Timedelta(hours=1)
-
-candle_end_times = btc_data.index + candle_duration
-completed = candle_end_times <= now
-
-removed_count = int((~completed).sum())
-btc_data = btc_data.loc[completed].copy()
-
-if removed_count > 0:
-    print(
-        f"Excluded {removed_count} candle(s) "
-        "whose closing time has not yet arrived."
-    )
-
-if btc_data.empty:
-    raise ValueError("No completed candles are available.")
-
-# -------------------------------------------------
-# Check that consecutive candles are one hour apart.
-# -------------------------------------------------
-
-time_gaps = btc_data.index.to_series().diff()
-
-bad_gaps = (
-    time_gaps.notna()
-    & (time_gaps != candle_duration)
-)
-
-if bad_gaps.any():
-    first_bad_timestamp = time_gaps.index[bad_gaps][0]
-    gap_size = time_gaps.loc[first_bad_timestamp]
-
-    raise ValueError(
-        "Missing or irregular hourly candles: "
-        f"the gap ending at {first_bad_timestamp} "
-        f"is {gap_size}, rather than one hour."
-    )
-
-prices = btc_data[required_columns].apply(
-    pd.to_numeric,
-    errors="coerce"
-)
-
-invalid_prices = (
-    prices.isna()
-    | prices.isin([float("inf"), float("-inf")])
-    | (prices <= 0)
-)
-
-if invalid_prices.any().any():
-    raise ValueError(
-        "Prices contain missing, nonnumeric, infinite, "
-        "or nonpositive values."
-    )
-
-invalid_candles = (
-    (prices["High"] < prices["Low"])
-    | (prices["High"] < prices["Open"])
-    | (prices["High"] < prices["Close"])
-    | (prices["Low"] > prices["Open"])
-    | (prices["Low"] > prices["Close"])
-)
-
-if invalid_candles.any():
-    raise ValueError("Some candles have inconsistent OHLC prices.")
-
-btc_data[required_columns] = prices
+# Preserve the returned raw data before marking/reindexing invalid candles
+btc_data.to_csv(run_dir / "raw_market_data.csv")
+btc_data = prepare_hourly_data(btc_data)
 
 input_path = run_dir / "market_data.csv"
 btc_data.to_csv(input_path)
 
-data_hash = hashlib.sha256(
-    input_path.read_bytes()
-).hexdigest()
+# Hash for unique data trial storage
+data_hash = hashlib.sha256(input_path.read_bytes()).hexdigest()
 
-metadata = {
-    "run_id": run_id,
-    "data_sha256": data_hash,
-    "first_candle": str(btc_data.index.min()),
-    "last_candle": str(btc_data.index.max()),
-    "number_of_candles": len(btc_data),
-    "atr_method": "simple rolling mean of true range",
-    "atr_period": config["atr"]["period"]
-}
+metadata = {"run_id": run_id,
+            "data_sha256": data_hash,
+            "first_candle": str(btc_data.index.min()),
+            "last_candle": str(btc_data.index.max()),
+            "number_of_candles": len(btc_data),
+            "atr_method": "simple rolling mean of true range", # Tracks the "average true range"
+            "atr_period": config["atr"]["period"]} # Specifies that the calculation occurs over a certain period
 
+# Writes used metadata and config
 with open(run_dir / "metadata.json", "w") as file:
     json.dump(metadata, file, indent=4)
+
+with open(run_dir / "config_used.json", "w") as file:
+    json.dump(config, file, indent=4)
 
 # -----------------------------
 # Calculate indicators
 # -----------------------------
 
-btc_data = calculate_atr(
-    btc_data,
-    period=config["atr"]["period"]
-)
+# ATR restarts after each gap. An imputed close cannot reconstruct OHLC/ATR
+btc_data["ATR"] = float("nan")
+segment_ids = (~btc_data["observed_ohlc"]).cumsum()
+for _, segment in btc_data[btc_data["observed_ohlc"]].groupby(segment_ids):
+    calculated = calculate_atr(segment.copy(), period=config["atr"]["period"])
+    btc_data.loc[segment.index, "ATR"] = calculated["ATR"]
 
-btc_data["SMA_20"] = calculate_sma(
-    btc_data,
-    20
-)
+# Calculates the moving average for the closing price from 20 and 50 periods.
+btc_data["SMA_20"] = calculate_sma(btc_data, 20)
 
-btc_data["SMA_50"] = calculate_sma(
-    btc_data,
-    50
-)
+btc_data["SMA_50"] = calculate_sma(btc_data, 50)
 
+# Keep track of previous moving averages and closing price to accurately simulate when to enact a strategy
 btc_data["PREV_SMA_20"] = btc_data["SMA_20"].shift(1)
 btc_data["PREV_SMA_50"] = btc_data["SMA_50"].shift(1)
 btc_data["PREV_CLOSE"] = btc_data["Close"].shift(1)
-
-required_indicators = [
-    "SMA_20",
-    "SMA_50",
-    "PREV_SMA_20",
-    "PREV_SMA_50",
-    "ATR"
-]
 
 # -----------------------------
 # Create portfolio
 # -----------------------------
 
-portfolio = Portfolio(
-    config["starting_budget"],
-    config["dca"]["allocation"],
-    config["swing"]["allocation"],
-    config["reserve"],
-    config["execution"]["fee_rate"]
-)
+# Creating a portfolio and defining state based on the constructed classes on other documents. Further detail
+# is shared in said documents.
+portfolio = Portfolio(config["starting_budget"],
+                      config["dca"]["allocation"],
+                      config["swing"]["allocation"],
+                      config["reserve"],
+                      config["execution"]["fee_rate"],
+                      slippage_rate=config["execution"]["slippage_rate"])
 
+state = EngineState()
+store = SQLiteStore(run_dir / 'trading.sqlite')
+store.initialize(config, portfolio, state, mode='backtest', context={'data_sha256': data_hash})
+portfolio, state, revision = store.restore()
 
-# -----------------------------
-# Track previous DCA purchase
-# -----------------------------
+# Actually executes the trading strategy
+execution = ExecutionModel(fee_rate=config["execution"]["fee_rate"],
+                           slippage_rate=config["execution"]["slippage_rate"],)
 
-last_buy_price = None
+# Initialize data diagnostic tracking variablesx
+portfolio_history = []
+volatility_history = []
+stop_history = []
+risk_history = []
+fills = []
 
+# These defaults are for diagnostics, to ensure consistency
+garch_config = config.get("garch", {})
+forecast_every = int(garch_config.get("forecast_every_hours", 24))
+
+print(f"Forecast interval: {forecast_every} hour(s)", flush=True)
+print(f"Output folder: {run_dir}", flush=True)
+
+# Makes sure the given configurations are valid
+window_hours = int(garch_config.get("window_hours", 24 * 180))
+if forecast_every < 1 or window_hours < 3:
+    raise ValueError("Invalid GARCH cadence or window.")
+
+risk_config = config["risk"]
+
+# For now, since GARCH predicts the next hour's closing price
+if forecast_every != 1:
+    raise ValueError("This sizing experiment requires a fresh forecast every hour.")
 
 # -----------------------------
 # Walk through BTC history
 # -----------------------------
-portfolio_history = []
-pending_swing_buy = None
-pending_dca_buy = None
-exited_this_candle = False
-active_position = None
 
-# Keep this initialization before the loop.
-last_buy_price = None
+# This is the primary loop per candle. Enumarates data rows to run through
+for row_number, (timestamp, candle) in enumerate(btc_data.iterrows()):
 
-for timestamp, candle in btc_data.iterrows():
+    event_key = 'candle:' + timestamp.isoformat()
 
-    opening_price = candle["Open"]
-    current_price = candle["Close"]
-    current_atr = candle["ATR"]
+    # Stores what candle and timestamp is being used
+    if store.contains(event_key):
+        continue
 
-    cur_short_sma = candle["SMA_20"]
-    cur_long_sma = candle["SMA_50"]
-    prev_short_sma = candle["PREV_SMA_20"]
-    prev_long_sma = candle["PREV_SMA_50"]
+    history = btc_data.iloc[:row_number + 1]
 
-    exited_this_candle = False
+    # process_candle is defined elsewhere. It presents the full logic for how trading strategies are determined.
+    result = process_candle(timestamp=timestamp,
+                            candle=candle,
+                            history=history,
+                            row_number=row_number,
+                            portfolio=portfolio,
+                            state=state,
+                            execution=execution,
+                            config=config,
+                            )
 
-    # -------------------------------------------------
-    # 1. AT THE OPEN:
-    # Execute the order saved after the previous close.
-    # -------------------------------------------------
+    # Saves the result of one processing step into SQLite, updating the version number
+    revision = store.commit(event_key, portfolio, state, result, revision)
 
-        # Execute the DCA decision made at the previous close.
-    if pending_dca_buy is not None:
+    # Print only after the trade and resulting state have been committed
+    for fill in result.fills:
+        print(f'{fill.timestamp} | {fill.strategy} {fill.side} | '
+              f'{fill.btc_amount:.8f} BTC at ${fill.fill_price:,.2f} | {fill.reason}', flush=True)
+    
+    # Keeps track of the history of what was traded, for when strategies were exited, the predicted risk and volatility.
+    fills.extend(result.fills)
+    stop_history.extend(result.stop_events)
+    risk_history.extend(result.risk_events)
+    volatility_history.extend(result.volatility_events)
 
-        trade_successful = portfolio.buy_btc(
-            pending_dca_buy["amount"],
-            opening_price,
-            timestamp
-        )
+    if result.portfolio_snapshot is not None:
+        portfolio_history.append(result.portfolio_snapshot)
 
-        if trade_successful:
-            # Remember the actual simulated purchase price.
-            last_buy_price = opening_price
+# Saving diagnostics and portfolio information.
+pd.DataFrame(stop_history,
+    columns=["decision_time",
+            "effective_from",
+            "close",
+            "sigma_next_hour",
+            "previous_stop",
+            "updated_stop",
+            "reason",
+            ],).to_csv(
+    run_dir / "stop_history.csv",
+    index=False,)
 
-        # Give this order one execution attempt.
-        pending_dca_buy = None
+pd.DataFrame(volatility_history).to_csv(run_dir / "volatility_history.csv", index=False)
 
-    if pending_swing_buy is not None:
-
-        if active_position is None:
-
-            trade_successful = portfolio.buy_active(
-                pending_swing_buy["amount"],
-                opening_price,
-                timestamp
-            )
-
-            if trade_successful:
-
-                stop_loss = calculate_stop_loss(
-                    opening_price,
-                    pending_swing_buy["atr"],
-                    pending_swing_buy["atr_multiplier"]
-                )
-
-                active_position = {
-                    "entry_price": opening_price,
-                    "stop_loss": stop_loss
-                }
-
-        # This order gets one execution attempt.
-        # Clear it even if insufficient cash prevented the buy.
-        pending_swing_buy = None
-
-    # -------------------------------------------------
-    # 2. DURING THE CANDLE:
-    # Check whether an active stop was crossed.
-    # -------------------------------------------------
-
-    if active_position is not None:
-
-        stop_price = active_position["stop_loss"]
-        exit_price = None
-
-        if opening_price <= stop_price:
-            # Price opened at/below the stop.
-            # Assume execution at the opening price.
-            exit_price = opening_price
-
-        elif candle["Low"] <= stop_price:
-            # Price reached the stop during the candle.
-            # Assume execution at the stop price.
-            exit_price = stop_price
-
-        if exit_price is not None:
-
-            sale_successful = portfolio.sell_active(
-                exit_price,
-                timestamp
-            )
-
-            if sale_successful:
-                active_position = None
-                exited_this_candle = True
-
-    # -------------------------------------------------
-    # 3. AT THE CLOSE:
-    # Generate an order for the NEXT candle's opening.
-    # -------------------------------------------------
-
-    indicator_values = candle[required_indicators]
-
-    indicators_available = (
-        indicator_values.notna().all()
-        and not indicator_values.isin(
-            [float("inf"), float("-inf")]
-        ).any()
-    )
-
-    if (
-        active_position is None
-        and not exited_this_candle
-        and indicators_available
-        and current_atr > 0
-    ):
-
-        if should_open_swing_trade(
-            prev_short_sma,
-            prev_long_sma,
-            cur_short_sma,
-            cur_long_sma
-        ):
-
-            pending_swing_buy = {
-                "amount": config["swing"]["trade_amount"],
-                "atr": current_atr,
-                "atr_multiplier": config["atr"]["multiplier"]
-            }
-
-    # -------------------------------------------------
-    # 4. AT THE CLOSE:
-    # Schedule a DCA purchase for the next opening.
-    # -------------------------------------------------
-
-    if (
-        portfolio.dca_cash >= config["dca"]["amount"]
-        and should_dca_buy(
-            current_price,
-            last_buy_price,
-            config["dca"]["drop_threshold"]
-        )
-    ):
-
-        pending_dca_buy = {
-            "amount": config["dca"]["amount"]
-        }
-
-    # -------------------------------------------------
-    # 5. Record portfolio value at this candle's close.
-    # -------------------------------------------------
-
-    portfolio_value = portfolio.get_value(current_price)
-
-    portfolio_history.append({
-        "timestamp": timestamp,
-        "btc_price": current_price,
-        "cash": portfolio.cash,
-        "dca_cash": portfolio.dca_cash,
-        "swing_cash": portfolio.swing_cash,
-        "reserve_cash": portfolio.reserve_cash,
-        "dca_btc": portfolio.dca_btc,
-        "active_btc": portfolio.active_btc,
-        "portfolio_value": portfolio.get_value(current_price)
-    })
-
-        
-
-history_df = pd.DataFrame(
-    portfolio_history
-)
+history_df = pd.DataFrame(portfolio_history)
 
 starting_value = config["starting_budget"]
 
-running_peak = (
-    history_df["portfolio_value"]
-    .cummax()
-    .clip(lower=starting_value)
-)
+running_peak = (history_df["portfolio_value"].cummax().clip(lower=starting_value))
 
-history_df["drawdown"] = (
-    history_df["portfolio_value"] / running_peak - 1
-)
+history_df["drawdown"] = (history_df["portfolio_value"] / running_peak - 1)
 
 max_drawdown = -history_df["drawdown"].min()
 
-history_df.to_csv(
-    run_dir / "portfolio_history.csv",
-    index=False
-)
+history_df.to_csv(run_dir / "portfolio_history.csv", index=False)
 
-print(
-    f"Portfolio history saved to "
-    f"{run_dir / 'portfolio_history.csv'}"
-)
+print(f"Portfolio history saved to "
+      f"{run_dir / 'portfolio_history.csv'}")
 
 # -----------------------------
 # Final results
 # -----------------------------
 
-final_price = btc_data.iloc[-1]["Close"]
+# Use the last observed close for end valuation; report its age/limitations.
+final_price = state.last_observed_close
+if final_price is None:
+    raise ValueError("No usable observed candle; no backtest could be evaluated.")
 
-final_value = portfolio.get_value(
-    final_price
-)
+final_value = portfolio.get_value(final_price)
 
+# Tracks price of total unsold bitcoin from DCA
+dca_unrealized_pnl = portfolio.dca_btc * final_price - portfolio.dca_cost
 
-dca_unrealized_pnl = (
-    portfolio.dca_btc * final_price
-    - portfolio.dca_cost
-)
+# Tracks price of total unsold bitcoin from swing
+swing_unrealized_pnl = portfolio.active_btc * final_price - portfolio.active_cost
 
-swing_unrealized_pnl = (
-    portfolio.active_btc * final_price
-    - portfolio.active_cost
-)
+# Tracks the total value from DCA strategy
+dca_value = portfolio.dca_cash + portfolio.dca_btc * final_price
 
-dca_value = (
-    portfolio.dca_cash
-    + portfolio.dca_btc * final_price
-)
+# Tracks the total value from DCA strategy
+swing_value = portfolio.swing_cash + portfolio.active_btc * final_price
 
-swing_value = (
-    portfolio.swing_cash
-    + portfolio.active_btc * final_price
-)
-
+# Track P&L from both strategies
 dca_pnl = dca_value - config["dca"]["allocation"]
 swing_pnl = swing_value - config["swing"]["allocation"]
 
+# Total, tangible profit from portfolio at-large
 account_profit = final_value - starting_value
+recorded_profit = portfolio.realized_pnl + dca_unrealized_pnl + swing_unrealized_pnl
 
-recorded_profit = (
-    portfolio.realized_pnl
-    + dca_unrealized_pnl
-    + swing_unrealized_pnl
-)
-
+# Ensures dependent calculations preserve their relationships.
 if abs(account_profit - recorded_profit) > 0.000001:
-    raise ValueError(
-        "Accounting mismatch: portfolio growth does not "
-        "equal realized plus unrealized P/L."
-    )
+    raise ValueError("Accounting mismatch: portfolio growth does not "
+                     "equal realized plus unrealized P/L.")
 
 if abs(account_profit - (dca_pnl + swing_pnl)) > 0.000001:
-    raise ValueError(
-        "Accounting mismatch: strategy profits do not "
-        "add up to total portfolio profit."
-    )
+    raise ValueError("Accounting mismatch: strategy profits do not "
+                     "add up to total portfolio profit.")
 
+## Summarizes key points for the run, including:
+#  The certainty of the execution path
+#  How many observations were missing from the API pull
+#  Whether or not stale data was used
+#  The starting, finishing values, returns, maximum drawdown, total trades, how much was spent on fees
+#  simulated slippage, and P&L statistics.
 summary = {
+    "execution_path_uncertain": state.execution_path_uncertain,
+    "missing_or_invalid_hours": int((~btc_data["observed_ohlc"]).sum()),
+    "final_valuation_is_stale": bool(not btc_data.iloc[-1]["observed_ohlc"]),
+    "performance_note": ("Missing hours prevent complete drawdown measurement; if execution_path_uncertain "
+                         "is true, trades/P&L are a continuation scenario, not verified historical execution."),
     "starting_value": starting_value,
     "final_value": final_value,
-    "return_pct": (
-        final_value / starting_value - 1
-    ) * 100,
+    "return_pct": (final_value / starting_value - 1) * 100,
     "max_drawdown_pct": max_drawdown * 100,
     "trade_count": len(portfolio.trades),
-    "fees_paid": sum(
-        trade["fee_usd"]
-        for trade in portfolio.trades
-    ),
+    "fees_paid": sum(trade["fee_usd"] for trade in portfolio.trades),
+    "simulated_slippage_usd": sum(t["slippage_usd"] for t in portfolio.trades),
     "realized_pnl": portfolio.realized_pnl,
-    "unrealized_pnl": (
-        dca_unrealized_pnl + swing_unrealized_pnl
-    ),
+    "unrealized_pnl": dca_unrealized_pnl + swing_unrealized_pnl,
     "dca_pnl": dca_pnl,
     "swing_pnl": swing_pnl
 }
 
+# Printing and saving the final results
 with open(run_dir / "summary.json", "w") as file:
     json.dump(summary, file, indent=4)
 
@@ -514,39 +306,28 @@ print()
 print("FINAL RESULTS")
 print("----------------")
 
-print(
-    f"Cash remaining: "
-    f"${portfolio.cash:.2f}"
-)
+print(f"Cash remaining: "
+      f"${portfolio.cash:.2f}")
 
-print(
-    f"BTC owned: "
-    f"{portfolio.dca_btc + portfolio.active_btc:.6f}"
-)
+print(f"BTC owned: "
+      f"{portfolio.dca_btc + portfolio.active_btc:.6f}")
 
-print(
-    f"Portfolio value: "
-    f"${final_value:.2f}"
-)
+print(f"Portfolio value: "
+      f"${final_value:.2f}")
 
 trades_df = pd.DataFrame(portfolio.trades)
 
-trades_df.to_csv(
-    run_dir / "trades.csv",
-    index=False
-)
+trades_df.to_csv(run_dir / "trades.csv",
+                 index=False)
 
-print(
-    f"Trades saved to {run_dir / 'trades.csv'}"
-)
+print(f"Trades saved to {run_dir / 'trades.csv'}")
 
-starting_value = config["starting_budget"]
+pd.DataFrame(risk_history).to_csv(run_dir / "risk_history.csv", index=False,)
 
-total_return = (
-    final_value - starting_value
-) / starting_value
+total_return = (final_value - starting_value) / starting_value
 
-print(
-    f"Total return: "
-    f"{total_return * 100:.2f}%"
-)
+print(f"Total return: "
+      f"{total_return * 100:.2f}%")
+
+# Close SQL database management
+store.close()

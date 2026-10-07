@@ -1,0 +1,9 @@
+{
+    "run_id": "20261006T154435_052294Z_BULL",
+    "data_sha256": "73d7386d8c736193f9bce19d2141fbbcc076fd015a8d89721444cdb2cbeb3192",
+    "first_candle": "2025-10-06 15:00:00+00:00",
+    "last_candle": "2026-10-06 14:00:00+00:00",
+    "number_of_candles": 8760,
+    "atr_method": "simple rolling mean of true range",
+    "atr_period": 14
+}
