@@ -1,0 +1,2 @@
+google-auth[requests]>=2.38,<3
+python-dotenv>=1,<2

@@ -9,6 +9,9 @@ import time
 import uuid
 import pandas as pd
 from filelock import FileLock
+from dotenv import load_dotenv
+from services.sheet_config import SheetPoller, config_hash, require_live_compatible
+from services.config_store import ConfigStore, refresh_cache
 from services.config_validation import validate_config
 from trading.models import EngineState
 from trading.execution import ExecutionModel
@@ -55,10 +58,13 @@ def print_fills(result):
                      fill.trade_id)
 
 
-def run(config,database,notify=False,once=False):
+def run(config,database,notify=False,once=False,sheets=False):
 
     # Sets up SQL database. Grants initial portfolio and engine state
-    store=SQLiteStore(database)
+    store=ConfigStore(database) if sheets else SQLiteStore(database)
+    cache_path=Path(str(database)+'.config.json')
+    if sheets:
+        config=store.startup_config(config,cache_path)
     store.initialize(config,new_portfolio(config),EngineState(),
                      'paper',{'provider':'Coinbase Exchange',
                               'product':'BTC-USD','schema':1})
@@ -66,6 +72,12 @@ def run(config,database,notify=False,once=False):
     # Bot restores previous portfolio and trading state
     portfolio,state,revision=store.restore()
     execution=ExecutionModel(**config['execution'])
+    sheet_poller=None
+    if sheets:
+        store.record_initial_config(config,revision)
+        refresh_cache(cache_path,config)
+        if not once:
+            sheet_poller=SheetPoller(config)
 
     # Retrieves BTC market data
     feed=CoinbaseFeed()
@@ -84,6 +96,25 @@ def run(config,database,notify=False,once=False):
     failures=0
     try:
         while True:
+            # Apply only between forecasts. Never mix a forecast fitted under old
+            # settings with a decision evaluated under new settings.
+            if sheet_poller is not None:
+                candidate=sheet_poller.tick(can_apply=forecast_job is None)
+                if candidate is not None:
+                    try:
+                        candidate=require_live_compatible(candidate,config)
+                    except ValueError as error:
+                        logging.warning('Sheet configuration rejected: %s',error)
+                    else:
+                        if candidate != config:
+                            # Database errors deliberately propagate: never keep
+                            # trading with state that failed to commit.
+                            config,state,revision=store.apply_config(candidate,config,state,revision)
+                            refresh_cache(cache_path,config)
+                            logging.info('Sheet configuration applied: %s',config_hash(config)[:12])
+                        else:
+                            logging.info('Sheet checked: configuration unchanged.')
+            # Existing quote monitoring and trading logic follows.
             # Check if new quote must be pulled
             if time.monotonic()>=next_quote:
                 next_quote=time.monotonic()+POLL_SECONDS
@@ -159,7 +190,8 @@ def run(config,database,notify=False,once=False):
                     result = process_close(timestamp,candle,None,0,portfolio,state,config,exited,estimate)
                     event = {'kind' : 'close_decision',
                              'candle' : timestamp,
-                             'actual_decision_time' : now()}
+                             'actual_decision_time' : now(),
+                             'config_hash' : config_hash(config)}
                 else:
                     state.last_processed_candle = timestamp
                     state.pending_dca=state.pending_swing_buy = None
@@ -220,6 +252,8 @@ def run(config,database,notify=False,once=False):
     except KeyboardInterrupt:
         logging.info('Stopped. Last committed state is saved.')
     finally:
+        if sheet_poller is not None:
+            sheet_poller.close()
         threads.shutdown(wait=False,cancel_futures=True)
         processes.shutdown(wait=False,cancel_futures=True)
         store.close()
@@ -229,11 +263,14 @@ def main():
     p = argparse.ArgumentParser();p.add_argument('--config',default='config.json')
     p.add_argument('--db',default='runtime/paper.sqlite');p.add_argument('--once',action='store_true')
     p.add_argument('--telegram',action='store_true',help='Queue notifications for NEW paper fills')
-    a = p.parse_args();config=json.loads(Path(a.config).read_text());validate_config(config)
+    p.add_argument('--sheets',action='store_true',help='Read validated Google Sheets settings hourly')
+    a = p.parse_args()
+    load_dotenv(Path(__file__).with_name('.env'))
+    config=json.loads(Path(a.config).read_text());validate_config(config)
     path=Path(a.db).resolve();path.parent.mkdir(parents=True,exist_ok=True)
     log = RotatingFileHandler(path.parent/'paper.log',maxBytes=5_000_000,backupCount=3)
     logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s',handlers=[logging.StreamHandler(),log])
-    with FileLock(str(path)+'.runner.lock',timeout=0):run(config,path,a.telegram,a.once)
+    with FileLock(str(path)+'.runner.lock',timeout=0):run(config,path,a.telegram,a.once,a.sheets)
 
 
 if __name__=='__main__':main()
