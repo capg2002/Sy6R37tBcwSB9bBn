@@ -1,0 +1,8 @@
+{
+  "model": "gemini-3.1-flash-lite",
+  "poll_seconds": 10,
+  "timeout_seconds": 30,
+  "max_output_tokens": 500,
+  "max_input_age_seconds": 900,
+  "max_requests_per_utc_day": 10
+}

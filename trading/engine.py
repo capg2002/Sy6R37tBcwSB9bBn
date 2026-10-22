@@ -6,6 +6,10 @@ from math import exp, isfinite
 import pandas as pd
 
 from trading.dca_strategy import should_dca_buy
+from trading.strategy_modes import (
+    entry_allowed,
+    cancel_disallowed_entries,
+)
 from trading.models import ActivePosition, OrderIntent
 from trading.risk import size_swing_purchase
 from trading.swing_strategy import (
@@ -139,6 +143,16 @@ def process_candle(
     # =========================================================
     # 1. AT THE OPEN
     # =========================================================
+
+    cancelled_order_ids = cancel_disallowed_entries(state, config)
+
+    if cancelled_order_ids:
+        result.risk_events.append({
+            "decision_time": timestamp,
+            "reason": "strategy_mode_cancelled_pending_entries",
+            "strategy_mode": config["strategy_mode"],
+            "cancelled_order_ids": cancelled_order_ids,
+        })
 
     # 1A. Execute a swing sell decision made at the previous close.
     if state.pending_swing_sell is not None:
@@ -411,7 +425,8 @@ def process_close(timestamp, candle, history, row_number, portfolio, state, conf
 
     # 3E. Queue a new swing entry for NEXT candle's open.
     if (
-        state.active_position is None
+        entry_allowed(config, "SWING")
+        and state.active_position is None
         and not exited_this_candle
         and indicators_available
         and current_atr > 0
@@ -484,7 +499,8 @@ def process_close(timestamp, candle, history, row_number, portfolio, state, conf
 
     # 3F. Queue DCA buy for NEXT candle's open.
     if (
-        state.pending_dca is None
+        entry_allowed(config, "DCA")
+        and state.pending_dca is None
         and should_dca_buy(
             current_price,
             state.last_buy_price,
@@ -522,14 +538,28 @@ def process_close(timestamp, candle, history, row_number, portfolio, state, conf
     return result
 
 
-def process_quote(timestamp, bid, ask, portfolio, state, execution):
+def process_quote(timestamp, bid, ask, portfolio, state, execution, config):
     """Paper execution at an already freshness-validated CURRENT bid/ask."""
     from services.config_validation import number
-    number(bid, 'bid', strict=True)
-    number(ask, 'ask', strict=True)
+
+    number(bid, "bid", strict=True)
+    number(ask, "ask", strict=True)
+
     if bid > ask:
-        raise ValueError('Crossed bid/ask.')
+        raise ValueError("Crossed bid/ask.")
+
     result = CandleResult()
+
+    cancelled_order_ids = cancel_disallowed_entries(state, config)
+
+    if cancelled_order_ids:
+        result.risk_events.append({
+            "decision_time": timestamp,
+            "reason": "strategy_mode_cancelled_pending_entries",
+            "strategy_mode": config["strategy_mode"],
+            "cancelled_order_ids": cancelled_order_ids,
+        })
+
     exited_this_candle = False
     for name in ('pending_dca', 'pending_swing_buy'):
         order = getattr(state, name)

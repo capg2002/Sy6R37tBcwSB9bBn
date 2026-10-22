@@ -18,6 +18,7 @@ import time
 try:
     import pandas as pd
     import yfinance as yf
+    
 except ImportError as exc:
     raise SystemExit(
         f"Missing dependency: {exc.name}. Install with:\n"
@@ -30,6 +31,7 @@ OHLC = ["Open", "High", "Low", "Close"]
 
 def valid_prices(frame):
     """Return one Boolean per row; NaN, infinity, or impossible OHLC fails."""
+
     p = frame[OHLC].apply(pd.to_numeric, errors="coerce")
     finite_positive = (p.notna() & ~p.isin([float("inf"), float("-inf")]) & (p > 0)).all(axis=1)
     consistent = (
@@ -41,27 +43,35 @@ def valid_prices(frame):
 
 def analyse(raw, folder, now):
     """Preserve raw rows, then report hourly coverage without repairing it."""
+
     raw.to_csv(folder / "raw_download.csv")
     if raw.empty:
         raise ValueError("Download returned no rows. Check provider errors in the terminal.")
+    
     if not isinstance(raw.index, pd.DatetimeIndex):
         raise ValueError("Response does not have a DatetimeIndex.")
+    
     if raw.index.tz is None:
         raise ValueError("Timestamps have no timezone; refusing to guess it.")
+    
     if raw.index.hasnans:
         raise ValueError("Response has missing timestamps; raw data saved for inspection.")
+    
     if isinstance(raw.columns, pd.MultiIndex) or not set(OHLC).issubset(raw.columns):
         raise ValueError("Expected flat Open/High/Low/Close columns; inspect raw_download.csv.")
 
     frame = raw.copy()
     frame.index = frame.index.tz_convert("UTC")
     was_sorted = frame.index.is_monotonic_increasing
+
     frame = frame.sort_index()
     duplicate_rows = frame.index.duplicated(keep=False)
     frame.loc[duplicate_rows].to_csv(folder / "duplicate_rows.csv")
+
     unfinished = frame.index + HOUR > now
     frame.loc[unfinished].to_csv(folder / "unfinished_candles.csv")
     complete = frame.loc[~unfinished].copy()
+
     if complete.empty:
         raise ValueError("No completed candles available.")
 
@@ -80,6 +90,7 @@ def analyse(raw, folder, now):
                 missing = max(0, int(elapsed / HOUR) - 1)
             gaps.append({"previous_timestamp": previous, "current_timestamp": current,
                          "gap_hours": elapsed / HOUR, "missing_candles": missing})
+            
     gap_table = pd.DataFrame(gaps, columns=["previous_timestamp", "current_timestamp", "gap_hours", "missing_candles"])
     gap_table.to_csv(folder / "data_gaps.csv", index=False)
 
@@ -87,6 +98,7 @@ def analyse(raw, folder, now):
     expected = pd.date_range(stamps.min().ceil("h"), stamps.max().floor("h"), freq="h")
     missing_stamps = expected.difference(stamps)
     pd.DataFrame({"missing_timestamp": missing_stamps}).to_csv(folder / "missing_hours.csv", index=False)
+   
     summary = {
         "raw_rows": len(raw), "original_timezone": str(raw.index.tz),
         "originally_sorted": bool(was_sorted),
@@ -99,6 +111,7 @@ def analyse(raw, folder, now):
         "irregular_intervals": len(gaps), "missing_hours_within_returned_span": len(missing_stamps),
         "scope": "Internal coverage only; does not prove requested start/end coverage or explain the cause of missing data.",
     }
+
     return summary, gap_table
 
 
@@ -137,9 +150,12 @@ def retry_gaps(gaps, folder, limit):
             usable = raw.index[valid & ~raw.index.duplicated(keep=False)]
             recovered = expected.intersection(usable)
             record.update(valid_hours_recovered=len(recovered),
-                          status="all_recovered" if len(recovered) == len(expected) else "partly_recovered" if len(recovered) else "not_recovered")
+                          status="all_recovered" if len(recovered) == len(expected) 
+                          else "partly_recovered" if len(recovered) else "not_recovered")
+        
         except Exception as exc:
             record.update(status="retry_failed", error=str(exc))
+
         results.append(record)
         if len(results) < limit:
             time.sleep(1)
@@ -147,14 +163,23 @@ def retry_gaps(gaps, folder, limit):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--period", default="1y", help="Default matches your project's one-year request.")
-    parser.add_argument("--start", help="Optional YYYY-MM-DD, interpreted as UTC.")
-    parser.add_argument("--end", help="Exclusive YYYY-MM-DD; requires --start.")
-    parser.add_argument("--max-retries", type=int, default=5, help="Maximum targeted gap requests; 0 disables retries.")
+    parser = argparse.ArgumentParser(description = __doc__)
+    parser.add_argument("--period", 
+                        default = "1y", 
+                        help = "Default matches your project's one-year request.")
+    parser.add_argument("--start", 
+                        help = "Optional YYYY-MM-DD, interpreted as UTC.")
+    parser.add_argument("--end", 
+                        help = "Exclusive YYYY-MM-DD; requires --start.")
+    parser.add_argument("--max-retries", 
+                        type=int, 
+                        default = 5, 
+                        help = "Maximum targeted gap requests; 0 disables retries.")
     args = parser.parse_args()
+
     if bool(args.start) != bool(args.end):
         parser.error("Supply both --start and --end, or neither.")
+        
     if args.max_retries < 0:
         parser.error("--max-retries must be nonnegative.")
     request = {"period": args.period}

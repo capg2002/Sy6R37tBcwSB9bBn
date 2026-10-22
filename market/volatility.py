@@ -28,8 +28,10 @@ def forecast_volatility(close_history, min_observed_returns=500, n_paths=5, seed
     """
     missing = int(close_history.isna().sum())
     adjacent_observed = int((close_history.notna() & close_history.shift().notna()).sum())
+
     if adjacent_observed < min_observed_returns:
         return VolatilityEstimate("warming_up", missing_hours=missing)
+    
     try:
         paths = sample_return_paths(close_history, n_paths=n_paths, seed=seed)
         variances = []
@@ -39,22 +41,26 @@ def forecast_volatility(close_history, min_observed_returns=500, n_paths=5, seed
                 dist="t", rescale=False
             )
             result = model.fit(disp="off", show_warning=False)
+
             if result.convergence_flag != 0:
                 return VolatilityEstimate(
                     "fit_failed", missing_hours=missing,
                     detail=f"Optimizer did not converge for {column}."
                 )
+            
             # Percentage returns were used for fitting: divide variance by 100^2.
             variance = float(result.forecast(horizon=1, reindex=False)
                              .residual_variance.iloc[-1, 0]) / 10_000
+            
             if not np.isfinite(variance) or variance <= 0:
                 raise ValueError("GARCH produced an invalid forecast variance.")
+            
             variances.append(variance)
         return VolatilityEstimate(
-            status="ok", sigma_next_hour=float(np.sqrt(np.mean(variances))),
-            sigma_path_min=float(np.sqrt(min(variances))),
-            sigma_path_max=float(np.sqrt(max(variances))),
-            missing_hours=missing, fitted_paths=len(variances)
+            status = "ok", sigma_next_hour=float(np.sqrt(np.mean(variances))),
+            sigma_path_min = float(np.sqrt(min(variances))),
+            sigma_path_max = float(np.sqrt(max(variances))),
+            missing_hours = missing, fitted_paths=len(variances)
         )
     except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
-        return VolatilityEstimate("fit_failed", missing_hours=missing, detail=str(exc))
+        return VolatilityEstimate("fit_failed", missing_hours = missing, detail = str(exc))

@@ -1,0 +1,88 @@
+name: bitcoin-paper
+x-common: &common
+  build: .
+  image: bitcoin-paper:local
+  init: true
+  restart: unless-stopped
+  stop_signal: SIGINT
+  stop_grace_period: 120s
+  user: "${APP_UID:-10001}:${APP_GID:-10001}"
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  volumes:
+    - type: bind
+      source: ./docker-runtime
+      target: /app/runtime
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ./config.json
+      target: /app/config.json
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ./reporting.json
+      target: /app/reporting.json
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ./advisor.json
+      target: /app/advisor.json
+      read_only: true
+      bind:
+        create_host_path: false
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+services:
+  trader:
+    <<: *common
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/sheets_key
+      GOOGLE_SHEETS_ID: ${GOOGLE_SHEETS_ID:?Set GOOGLE_SHEETS_ID in .env}
+      GOOGLE_SHEETS_RANGE: ${GOOGLE_SHEETS_RANGE:-Config!A:B}
+    secrets: [sheets_key]
+    command: [sh, -c, "python deploy/preflight.py && exec python paper_loop.py --db /app/runtime/paper.sqlite --sheets --telegram"]
+    healthcheck:
+      test: [CMD, python, deploy/healthcheck.py]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+  notifier:
+    <<: *common
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:?Set TELEGRAM_CHAT_ID}
+    depends_on:
+      trader:
+        condition: service_healthy
+    command: [python, notifications.py, --db, /app/runtime/paper.sqlite]
+  reporter:
+    <<: *common
+    environment:
+      GMAIL_SENDER: ${GMAIL_SENDER:?Set GMAIL_SENDER}
+      GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD:?Set GMAIL_APP_PASSWORD}
+      REPORT_RECIPIENT: ${REPORT_RECIPIENT:?Set REPORT_RECIPIENT}
+    depends_on:
+      trader:
+        condition: service_healthy
+    command: [python, weekly_reports.py, --db, /app/runtime/paper.sqlite, --watch]
+  advisor:
+    <<: *common
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY}
+    depends_on:
+      trader:
+        condition: service_healthy
+    command: [python, advisor.py, --db, /app/runtime/paper.sqlite, --watch]
+secrets:
+  sheets_key:
+    file: ./secrets/google-sheets-service-account.json

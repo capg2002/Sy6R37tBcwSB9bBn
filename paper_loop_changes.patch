@@ -1,0 +1,70 @@
+--- before/paper_loop.py
++++ after/paper_loop.py
+@@ -13,6 +13,7 @@
+ from services.sheet_config import SheetPoller, config_hash, require_live_compatible
+ from services.config_store import ConfigStore, refresh_cache
+ from services.config_validation import validate_config
++from services.advisor_context import market_summary, advisory_context
+ from trading.models import EngineState
+ from trading.execution import ExecutionModel
+ from trading.engine import CandleResult, process_close, process_quote
+@@ -43,15 +44,15 @@
+     if gap:
+         state.pending_dca=state.pending_swing_buy=None
+         if state.active_position is not None:state.execution_path_uncertain=True
+-        result = process_quote(
+-            timestamp,
+-            bid,
+-            ask,
+-            portfolio,
+-            state,
+-            execution,
+-            config,
+-        )
++    result = process_quote(
++        timestamp,
++        bid,
++        ask,
++        portfolio,
++        state,
++        execution,
++        config,
++    )
+     return result,gap
+ 
+ 
+@@ -184,7 +185,7 @@
+ 
+             if forecast_job is not None and forecast_job.done():
+                 job,forecast_job=forecast_job,None
+-                timestamp,candle=forecast_context
++                timestamp,candle,advisor_market=forecast_context
+ 
+                 try:
+                     estimate=job.result()
+@@ -203,6 +204,12 @@
+                              'candle' : timestamp,
+                              'actual_decision_time' : now(),
+                              'config_hash' : config_hash(config)}
++                    # Optional diagnostics must not prevent committing a trade decision.
++                    try:
++                        event['advisor_input'] = advisory_context(
++                            timestamp,advisor_market,estimate,portfolio,state,config)
++                    except Exception as error:
++                        logging.warning('Advisor input unavailable (%s).',type(error).__name__)
+                 else:
+                     state.last_processed_candle = timestamp
+                     state.pending_dca=state.pending_swing_buy = None
+@@ -254,7 +261,11 @@
+                                                   extra_events=[{'kind':'invalid_or_late_candle','candle':latest}])
+                         else:
+                             store.save_forecast_input(latest,history)
+-                            forecast_context = (latest,candle)
++                            try:
++                                advisor_market=market_summary(frame)
++                            except Exception:
++                                advisor_market={}
++                            forecast_context = (latest,candle,advisor_market)
+ 
+                             # Time-based seed survives restarts; backtests keep original row-based seeds
+                             seed = config['garch']['seed'] + int(latest.timestamp()//3600)

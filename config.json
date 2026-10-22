@@ -1,4 +1,5 @@
 {
+    "strategy_mode": "hybrid",
     "starting_budget": 10000,
     "exits": {
         "garch_trailing_enabled": true,
