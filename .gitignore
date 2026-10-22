@@ -1,3 +1,6 @@
 
 .venv314
 .venv
+.env
+secrets/
+runtime/
