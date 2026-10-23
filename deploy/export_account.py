@@ -22,6 +22,7 @@ def export(source, destination, target, expected_source = None):
     # Require an absolute expected source path for ledger identity comparisons.
     if not str(expected_source).startswith('/'): 
         raise ValueError('Expected source must be absolute.')
+    
     # Reject a missing source database before attempting an export.
     if not source.is_file():
         raise ValueError('Source database not found.')
@@ -90,9 +91,11 @@ def export(source, destination, target, expected_source = None):
             # Back up each validated database under its standard deployment filename.
             for src, suffix, table, column in pairs:
                 dst = destination/('paper.sqlite' + suffix)
+
                 # Open a read-only source and writable destination, closing both connections after the backup.
                 with closing(sqlite3.connect(src.as_uri() + '?mode=ro',
                                              uri = True)) as a, closing(sqlite3.connect(dst)) as b:
+                    
                     # Use SQLite backup to copy database contents rather than copying an active database file directly.
                     a.backup(b)
                     # Reject a copied database whose SQLite integrity check does not return ok.
@@ -123,6 +126,7 @@ def export(source, destination, target, expected_source = None):
                 'files':records,
                 'note':'Only copied ledger source paths changed; delivery IDs and statuses preserved.'},
                 indent=2))
+            
         # Mark the destination as an incomplete export and re-raise the original export failure.
         except Exception:
             # Incomplete exports are retained for inspection, never treated as ready.
@@ -139,6 +143,7 @@ if __name__ == '__main__':
     p.add_argument('--destination', required = True)
     p.add_argument('--target', default = '/app/runtime/paper.sqlite')
     p.add_argument('--expected-source', help = 'Exact stored ledger source path; only for relocating a verified account copy.')
+    
     # Parse the supplied arguments and pass them to the export function.
     a = p.parse_args(); export(a.source,
                                a.destination,

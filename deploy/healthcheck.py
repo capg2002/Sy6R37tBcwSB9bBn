@@ -10,6 +10,7 @@ import sys
 try:
     # Locate the paper-account database at the fixed container runtime path.
     p = Path('/app/runtime/paper.sqlite')
+    
     # Read the checkpoint engine state through a read-only connection with a two-second lock timeout.
     with sqlite3.connect(p.as_uri() + '?mode=ro', uri = True, timeout = 2) as db:
         row = db.execute('SELECT engine_json FROM checkpoint WHERE id=1').fetchone()

@@ -1,0 +1,20 @@
+# Full native installation: backtesting, paper trading, and optional services.
+# Existing service requirement bounds are retained. This is not a lockfile.
+
+# Market data, indicators, and volatility modelling
+numpy
+pandas
+statsmodels
+arch
+yfinance
+
+# HTTP clients, local credentials, and worker locks
+requests>=2.32,<3
+python-dotenv>=1,<2
+filelock>=3,<4
+
+# Google Sheets service-account authentication
+google-auth[requests]>=2.38,<3
+
+# IANA timezone data for scheduled reports, including Windows installations
+tzdata
